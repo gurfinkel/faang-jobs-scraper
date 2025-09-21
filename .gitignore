@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+
+# Virtual env
+.venv/
+
+# Playwright artifacts
+playwright-report/
+test-results/
+
+# Local data & logs
+data/
+*.log
+
+# Auth/cookies (never commit!)
+data/playwright_meta_storage.json
+
+# OS / IDE
+.DS_Store
+.vscode/
+.idea/
+
+# Terraform local state
+infra/.terraform/
+infra/.terraform.lock.hcl
+terraform.tfstate
+terraform.tfstate.*
+
+# Docker cruft
+*.local

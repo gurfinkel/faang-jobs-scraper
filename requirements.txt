@@ -1,0 +1,7 @@
+# Core HTTP + parsing
+requests>=2.32,<3
+beautifulsoup4>=4.12,<5
+lxml>=5.2,<6
+
+# JS-rendered listings (Meta & Netflix)
+playwright>=1.46,<2
