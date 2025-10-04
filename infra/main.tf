@@ -105,7 +105,7 @@ resource "aws_dynamodb_table" "jobs" {
     hash_key           = "company"
     range_key          = "posted_at"
     projection_type    = "INCLUDE"
-    non_key_attributes = ["url", "title", "description", "category", "loc_country", "loc_admin1", "loc_city", "remote", "last_seen_at"]
+    non_key_attributes = ["url", "title", "description", "category", "loc_country", "loc_admin1", "loc_city", "remote", "last_seen_at", "active"]
   }
 
   # Global secondary index to query by category and posting date
@@ -114,7 +114,7 @@ resource "aws_dynamodb_table" "jobs" {
     hash_key           = "category"
     range_key          = "posted_at"
     projection_type    = "INCLUDE"
-    non_key_attributes = ["url", "title", "description", "company", "loc_country", "loc_admin1", "loc_city", "remote", "last_seen_at"]
+    non_key_attributes = ["url", "title", "description", "company", "loc_country", "loc_admin1", "loc_city", "remote", "last_seen_at", "active"]
   }
 
   # Global secondary index to query by country and posting date
@@ -123,7 +123,7 @@ resource "aws_dynamodb_table" "jobs" {
     hash_key           = "loc_country"
     range_key          = "posted_at"
     projection_type    = "INCLUDE"
-    non_key_attributes = ["url", "title", "description", "company", "category", "loc_admin1", "loc_city", "remote", "last_seen_at"]
+    non_key_attributes = ["url", "title", "description", "company", "category", "loc_admin1", "loc_city", "remote", "last_seen_at", "active"]
   }
 }
 
