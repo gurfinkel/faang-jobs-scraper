@@ -20,7 +20,7 @@ terraform {
 variable "region" {
   description = "AWS region for all resources"
   type        = string
-  default     = "us‑east‑1"
+  default     = "us-east-1"
 }
 
 # A short prefix used when constructing resource names.  Set this to something
@@ -28,7 +28,7 @@ variable "region" {
 variable "project_name" {
   description = "Prefix for all resource names"
   type        = string
-  default     = "faang‑jobs‑scraper"
+  default     = "faang-jobs-scraper"
 }
 
 # Name of the ECR repository for the scraping container.  Defaults to
