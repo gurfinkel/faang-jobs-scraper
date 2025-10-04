@@ -8,3 +8,6 @@ playwright>=1.46,<2
 
 python-dateutil
 pycountry
+
+# AWS SDK
+boto3>=1.28,<2
