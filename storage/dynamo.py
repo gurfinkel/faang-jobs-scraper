@@ -5,7 +5,7 @@ import boto3
 from boto3.dynamodb.conditions import Key
 
 _DDB = boto3.resource("dynamodb")
-_TABLE = _DDB.Table(os.environ["DDB_TABLE"])
+_TABLE = _DDB.Table(os.environ["TABLE_NAME"])
 
 # -------- Locking to avoid overlap --------
 def acquire_lock(lock_key: str, ttl_sec: int = 5400) -> bool:
