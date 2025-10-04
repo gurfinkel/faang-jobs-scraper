@@ -267,6 +267,13 @@ resource "aws_iam_role_policy" "lambda_ddb_read" {
   })
 }
 
+# Attach AWS managed basic execution role to the Lambda role so the function can
+# write logs to CloudWatch.
+resource "aws_iam_role_policy_attachment" "lambda_basic" {
+  role       = aws_iam_role.lambda_role.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+}
+
 ####################
 # ECS Cluster and Fargate Task
 ####################
@@ -334,7 +341,7 @@ resource "aws_ecs_task_definition" "scraper" {
 resource "aws_security_group" "ecs" {
   name        = "${var.project_name}-scraper-sg"
   description = "Security group for FAANG scraper tasks"
-  vpc_id      = aws_default_vpc.default.id
+  vpc_id      = data.aws_vpc.default.id
 
   egress {
     from_port   = 0
@@ -344,12 +351,17 @@ resource "aws_security_group" "ecs" {
   }
 }
 
-# Use the default VPC and its subnets for Fargate tasks
-data "aws_default_vpc" "default" {}
+# Use the default VPC and its subnets for Fargate tasks.  The AWS provider
+# version 5.x no longer exposes a data source named `aws_default_vpc`; instead
+# query the default VPC using `aws_vpc` with the `default` argument.
+data "aws_vpc" "default" {
+  default = true
+}
+
 data "aws_subnets" "default" {
   filter {
     name   = "vpc-id"
-    values = [data.aws_default_vpc.default.id]
+    values = [data.aws_vpc.default.id]
   }
 }
 
