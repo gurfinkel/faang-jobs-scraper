@@ -1,23 +1,76 @@
 terraform {
   required_version = ">= 1.5.0"
   required_providers {
-    aws     = { source = "hashicorp/aws", version = ">= 5.0" }
-    archive = { source = "hashicorp/archive", version = ">= 2.4" }
+    aws = {
+      source  = "hashicorp/aws"
+      version = ">= 5.0"
+    }
+    archive = {
+      source  = "hashicorp/archive"
+      version = ">= 2.4"
+    }
   }
 }
+
+####################
+# Variables
+####################
+
+# Primary AWS region to deploy into.  Adjust this if you wish to run in a different region.
+variable "region" {
+  description = "AWS region for all resources"
+  type        = string
+  default     = "us‑east‑1"
+}
+
+# A short prefix used when constructing resource names.  Set this to something
+# unique (e.g. your project or repository name) to avoid naming collisions.
+variable "project_name" {
+  description = "Prefix for all resource names"
+  type        = string
+  default     = "faang‑jobs‑scraper"
+}
+
+# Name of the ECR repository for the scraping container.  Defaults to
+# "<project_name>-scraper".
+variable "ecr_repo_name" {
+  description = "Name of the ECR repository used for the scraper image"
+  type        = string
+  default     = null
+}
+
+# Name of the DynamoDB table used to store job postings.  Defaults to
+# "<project_name>_jobs".
+variable "ddb_table_name" {
+  description = "Name of the DynamoDB table used for job postings"
+  type        = string
+  default     = null
+}
+
+####################
+# Providers
+####################
 
 provider "aws" {
   region = var.region
 }
 
-# ---------- Variables ----------
-variable "region" { default = "us-east-1" }
-variable "ecr_repo_name" { default = "faang-scraper" }
-variable "ddb_table_name" { default = "faang_jobs" }
+locals {
+  # Resolve dynamic defaults based on the project_name.  Terraform allows
+  # variables to remain null; we then fill them here.
+  effective_ecr_repo_name = coalesce(var.ecr_repo_name, "${var.project_name}-scraper")
+  effective_ddb_table_name = coalesce(var.ddb_table_name, "${replace(var.project_name, "-", "_")}_jobs")
+}
 
-# ---------- DynamoDB ----------
+####################
+# DynamoDB
+####################
+
+# DynamoDB table storing job postings.  Each job is keyed by the company and
+# a unique URL to avoid duplicates.  Additional attributes are defined to
+# support secondary indexes used by the API.
 resource "aws_dynamodb_table" "jobs" {
-  name         = var.ddb_table_name
+  name         = local.effective_ddb_table_name
   billing_mode = "PAY_PER_REQUEST"
   hash_key     = "company"
   range_key    = "url"
@@ -32,7 +85,7 @@ resource "aws_dynamodb_table" "jobs" {
     type = "S"
   }
 
-  # Attributes used by GSIs
+  # Attributes used in secondary indexes
   attribute {
     name = "posted_at"
     type = "N"
@@ -46,94 +99,242 @@ resource "aws_dynamodb_table" "jobs" {
     type = "S"
   }
 
-  # GSIs for efficient queries
+  # Global secondary index to query by company and posting date
   global_secondary_index {
-    name            = "GSICompanyPosted"
-    hash_key        = "company"
-    range_key       = "posted_at"
-    projection_type = "INCLUDE"
-    non_key_attributes = [
-      "url", "title", "description", "category",
-      "loc_country", "loc_admin1", "loc_city", "remote", "last_seen_at"
-    ]
+    name               = "GSICompanyPosted"
+    hash_key           = "company"
+    range_key          = "posted_at"
+    projection_type    = "INCLUDE"
+    non_key_attributes = ["url", "title", "description", "category", "loc_country", "loc_admin1", "loc_city", "remote", "last_seen_at"]
   }
 
+  # Global secondary index to query by category and posting date
   global_secondary_index {
-    name            = "GSICategoryPosted"
-    hash_key        = "category"
-    range_key       = "posted_at"
-    projection_type = "INCLUDE"
-    non_key_attributes = [
-      "url", "title", "description", "company",
-      "loc_country", "loc_admin1", "loc_city", "remote", "last_seen_at"
-    ]
+    name               = "GSICategoryPosted"
+    hash_key           = "category"
+    range_key          = "posted_at"
+    projection_type    = "INCLUDE"
+    non_key_attributes = ["url", "title", "description", "company", "loc_country", "loc_admin1", "loc_city", "remote", "last_seen_at"]
   }
 
+  # Global secondary index to query by country and posting date
   global_secondary_index {
-    name            = "GSICountryPosted"
-    hash_key        = "loc_country"
-    range_key       = "posted_at"
-    projection_type = "INCLUDE"
-    non_key_attributes = [
-      "url", "title", "description", "company", "category",
-      "loc_admin1", "loc_city", "remote", "last_seen_at"
-    ]
+    name               = "GSILocationPosted"
+    hash_key           = "loc_country"
+    range_key          = "posted_at"
+    projection_type    = "INCLUDE"
+    non_key_attributes = ["url", "title", "description", "company", "category", "loc_admin1", "loc_city", "remote", "last_seen_at"]
   }
 }
 
-# ---------- ECR ----------
+####################
+# ECR Repository
+####################
+
 resource "aws_ecr_repository" "scraper" {
-  name = var.ecr_repo_name
-  image_scanning_configuration { scan_on_push = true }
+  name                 = local.effective_ecr_repo_name
+  image_scanning_configuration {
+    scan_on_push = true
+  }
   force_delete = true
 }
 
-# ---------- Networking (create our own VPC) ----------
-data "aws_availability_zones" "available" {
-  state = "available"
+####################
+# CloudWatch Log Groups
+####################
+
+resource "aws_cloudwatch_log_group" "ecs" {
+  name              = "/ecs/${var.project_name}-scraper"
+  retention_in_days = 30
 }
 
-resource "aws_vpc" "faang" {
-  cidr_block           = "10.0.0.0/16"
-  enable_dns_hostnames = true
-  enable_dns_support   = true
-  tags                 = { Name = "faang-vpc" }
+resource "aws_cloudwatch_log_group" "lambda_api" {
+  name              = "/aws/lambda/${var.project_name}-jobs-api"
+  retention_in_days = 30
 }
 
-resource "aws_internet_gateway" "igw" {
-  vpc_id = aws_vpc.faang.id
-  tags   = { Name = "faang-igw" }
+####################
+# IAM Roles and Policies
+####################
+
+# ECS execution role used to allow the ECS agent to pull images and write logs
+resource "aws_iam_role" "ecs_exec" {
+  name_prefix = "${var.project_name}-scraper-exec-role-"
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect    = "Allow"
+      Principal = { Service = "ecs-tasks.amazonaws.com" }
+      Action    = "sts:AssumeRole"
+    }]
+  })
 }
 
-resource "aws_subnet" "public" {
-  count                   = 2
-  vpc_id                  = aws_vpc.faang.id
-  cidr_block              = cidrsubnet(aws_vpc.faang.cidr_block, 8, count.index + 1) # 10.0.1.0/24, 10.0.2.0/24
-  availability_zone       = data.aws_availability_zones.available.names[count.index]
-  map_public_ip_on_launch = true
-  tags                    = { Name = "faang-public-${count.index}" }
+# ECS task role for the scraping task.  Grants permissions to write to DynamoDB
+resource "aws_iam_role" "ecs_task" {
+  name_prefix = "${var.project_name}-scraper-task-role-"
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect    = "Allow"
+      Principal = { Service = "ecs-tasks.amazonaws.com" }
+      Action    = "sts:AssumeRole"
+    }]
+  })
 }
 
-resource "aws_route_table" "public" {
-  vpc_id = aws_vpc.faang.id
-  route {
-    cidr_block = "0.0.0.0/0"
-    gateway_id = aws_internet_gateway.igw.id
+resource "aws_iam_policy" "ddb_rw" {
+  name_prefix = "${var.project_name}-scraper-ddb-rw-"
+  policy = jsonencode({
+    Version = "2012-10-17",
+    Statement = [{
+      Effect   = "Allow",
+      Action   = [
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:GetItem",
+        "dynamodb:Query",
+        "dynamodb:Scan"
+      ],
+      Resource = [aws_dynamodb_table.jobs.arn, "${aws_dynamodb_table.jobs.arn}/*"]
+    }]
+  })
+}
+
+resource "aws_iam_role_policy_attachment" "ecs_task_attach" {
+  role       = aws_iam_role.ecs_task.name
+  policy_arn = aws_iam_policy.ddb_rw.arn
+}
+
+# EventBridge rule role for triggering ECS tasks
+resource "aws_iam_role" "events_run_task" {
+  name_prefix = "${var.project_name}-scraper-events-role-"
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17",
+    Statement = [{
+      Effect    = "Allow",
+      Principal = { Service = "events.amazonaws.com" },
+      Action    = "sts:AssumeRole"
+    }]
+  })
+}
+
+resource "aws_iam_role_policy" "events_run_task" {
+  name = "${var.project_name}-scraper-events-policy"
+  role = aws_iam_role.events_run_task.id
+  policy = jsonencode({
+    Version = "2012-10-17",
+    Statement = [
+      {
+        Effect   = "Allow",
+        Action   = ["ecs:RunTask"],
+        Resource = "*"
+      },
+      {
+        Effect   = "Allow",
+        Action   = ["iam:PassRole"],
+        Resource = aws_iam_role.ecs_task.arn
+      }
+    ]
+  })
+}
+
+# Lambda role for API function
+resource "aws_iam_role" "lambda_role" {
+  name_prefix = "${var.project_name}-api-lambda-role-"
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17",
+    Statement = [{
+      Effect    = "Allow",
+      Principal = { Service = "lambda.amazonaws.com" },
+      Action    = "sts:AssumeRole"
+    }]
+  })
+}
+
+resource "aws_iam_role_policy" "lambda_ddb_read" {
+  name = "${var.project_name}-api-lambda-ddb-read"
+  role = aws_iam_role.lambda_role.id
+  policy = jsonencode({
+    Version = "2012-10-17",
+    Statement = [{
+      Effect   = "Allow",
+      Action   = ["dynamodb:Query", "dynamodb:GetItem", "dynamodb:Scan"],
+      Resource = [aws_dynamodb_table.jobs.arn, "${aws_dynamodb_table.jobs.arn}/*"]
+    }]
+  })
+}
+
+####################
+# ECS Cluster and Fargate Task
+####################
+
+# ECS cluster for the scraping task
+resource "aws_ecs_cluster" "this" {
+  name = "${var.project_name}-scraper-cluster"
+}
+
+# Task definition for the scraping container.  You will need to build and push
+# your scraper image to ECR before deploying.  The container definition
+# includes environment variables pointing to the DynamoDB table and region.
+data "aws_iam_policy_document" "ecs_task_execution_assume_role" {
+  statement {
+    actions = ["sts:AssumeRole"]
+    principals {
+      type        = "Service"
+      identifiers = ["ecs-tasks.amazonaws.com"]
+    }
   }
-  tags = { Name = "faang-public-rt" }
 }
 
-resource "aws_route_table_association" "public" {
-  count          = 2
-  subnet_id      = aws_subnet.public[count.index].id
-  route_table_id = aws_route_table.public.id
+resource "aws_iam_role" "ecs_task_execution" {
+  name_prefix = "${var.project_name}-scraper-execution-role-"
+  assume_role_policy = data.aws_iam_policy_document.ecs_task_execution_assume_role.json
 }
 
-# Security group for ECS tasks (egress only)
-resource "aws_security_group" "ecs_tasks" {
-  name        = "faang-scraper-sg"
-  description = "Egress-only SG for ECS tasks"
-  vpc_id      = aws_vpc.faang.id
+resource "aws_iam_role_policy_attachment" "ecs_task_execution_attach" {
+  role       = aws_iam_role.ecs_task_execution.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
+}
+
+resource "aws_ecs_task_definition" "scraper" {
+  family                   = "${var.project_name}-scraper-task"
+  cpu                      = 512
+  memory                   = 1024
+  network_mode             = "awsvpc"
+  requires_compatibilities = ["FARGATE"]
+  execution_role_arn       = aws_iam_role.ecs_task_execution.arn
+  task_role_arn            = aws_iam_role.ecs_task.arn
+
+  container_definitions = jsonencode([
+    {
+      name  = "scraper"
+      image = aws_ecr_repository.scraper.repository_url
+      essential = true
+      environment = [
+        { name = "TABLE_NAME", value = aws_dynamodb_table.jobs.name },
+        { name = "AWS_REGION", value = var.region }
+      ]
+      logConfiguration = {
+        logDriver = "awslogs",
+        options = {
+          awslogs-group         = aws_cloudwatch_log_group.ecs.name,
+          awslogs-region        = var.region,
+          awslogs-stream-prefix = "ecs"
+        }
+      }
+    }
+  ])
+}
+
+# Security group for the Fargate task.  No inbound rules needed since it
+# makes outbound requests only.
+resource "aws_security_group" "ecs" {
+  name        = "${var.project_name}-scraper-sg"
+  description = "Security group for FAANG scraper tasks"
+  vpc_id      = aws_default_vpc.default.id
 
   egress {
     from_port   = 0
@@ -143,217 +344,143 @@ resource "aws_security_group" "ecs_tasks" {
   }
 }
 
-# ---------- Logs & ECS ----------
-resource "aws_cloudwatch_log_group" "ecs" {
-  name              = "/ecs/faang-scraper"
-  retention_in_days = 30
-}
-
-resource "aws_ecs_cluster" "this" {
-  name = "faang-scraper-cluster"
-}
-
-# ---------- IAM (ECS) ----------
-resource "aws_iam_role" "ecs_exec" {
-  name = "faang-scraper-exec-role"
-  assume_role_policy = jsonencode({
-    Version   = "2012-10-17",
-    Statement = [{ Effect = "Allow", Principal = { Service = "ecs-tasks.amazonaws.com" }, Action = "sts:AssumeRole" }]
-  })
-}
-resource "aws_iam_role_policy_attachment" "ecs_exec_attach" {
-  role       = aws_iam_role.ecs_exec.name
-  policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
-}
-
-resource "aws_iam_role" "ecs_task" {
-  name = "faang-scraper-task-role"
-  assume_role_policy = jsonencode({
-    Version   = "2012-10-17",
-    Statement = [{ Effect = "Allow", Principal = { Service = "ecs-tasks.amazonaws.com" }, Action = "sts:AssumeRole" }]
-  })
-}
-
-resource "aws_iam_policy" "ddb_rw" {
-  name = "faang-scraper-ddb-rw"
-  policy = jsonencode({
-    Version = "2012-10-17",
-    Statement = [{
-      Effect = "Allow",
-      Action = [
-        "dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:BatchWriteItem",
-        "dynamodb:Query", "dynamodb:DeleteItem", "dynamodb:DescribeTable", "dynamodb:GetItem", "dynamodb:Scan"
-      ],
-      Resource = [aws_dynamodb_table.jobs.arn, "${aws_dynamodb_table.jobs.arn}/index/*"]
-    }]
-  })
-}
-resource "aws_iam_role_policy_attachment" "ecs_task_ddb" {
-  role       = aws_iam_role.ecs_task.name
-  policy_arn = aws_iam_policy.ddb_rw.arn
-}
-
-# ---------- ECS Task Definition ----------
-resource "aws_ecs_task_definition" "scrape" {
-  family                   = "faang-scraper"
-  requires_compatibilities = ["FARGATE"]
-  network_mode             = "awsvpc"
-  cpu                      = 1024
-  memory                   = 2048
-  execution_role_arn       = aws_iam_role.ecs_exec.arn
-  task_role_arn            = aws_iam_role.ecs_task.arn
-
-  # Pin to x86_64 (matches docker build --platform=linux/amd64)
-  runtime_platform {
-    operating_system_family = "LINUX"
-    cpu_architecture        = "X86_64"
+# Use the default VPC and its subnets for Fargate tasks
+data "aws_default_vpc" "default" {}
+data "aws_subnets" "default" {
+  filter {
+    name   = "vpc-id"
+    values = [data.aws_default_vpc.default.id]
   }
+}
 
-  container_definitions = jsonencode([
-    {
-      name      = "scraper",
-      image     = "${aws_ecr_repository.scraper.repository_url}:latest",
-      essential = true,
-      environment = [
-        { name = "DDB_TABLE", value = aws_dynamodb_table.jobs.name },
-        { name = "MAX_NEW_PER_RUN", value = "300" },   # cap new detail fetches per company/run
-        { name = "CHUNK_UPSERT_SIZE", value = "100" }, # flush to DynamoDB every 100 new items
-        { name = "LOCK_TTL_SEC", value = "5400" }      # lock TTL (seconds) to avoid overlap
-      ],
-      logConfiguration = {
-        logDriver = "awslogs",
-        options = {
-          awslogs-region        = var.region,
-          awslogs-group         = aws_cloudwatch_log_group.ecs.name,
-          awslogs-stream-prefix = "ecs"
-        }
-      },
-      command = ["python", "main.py"]
+####################
+# EventBridge Rule for Scraper
+####################
+
+# Schedule the Fargate task to run once per day.  Adjust the schedule_expression
+# to control the frequency.  See https://docs.aws.amazon.com/eventbridge/latest/userguide/eb-create-rule-schedule.html
+resource "aws_cloudwatch_event_rule" "daily_scrape" {
+  name                = "${var.project_name}-scraper-daily"
+  schedule_expression = "rate(1 day)"
+}
+
+resource "aws_cloudwatch_event_target" "daily_scrape" {
+  rule      = aws_cloudwatch_event_rule.daily_scrape.name
+  target_id = "${var.project_name}-scraper-task"
+  arn       = aws_ecs_cluster.this.arn
+  ecs_target {
+    task_definition_arn = aws_ecs_task_definition.scraper.arn
+    task_count          = 1
+    network_configuration {
+      subnets         = data.aws_subnets.default.ids
+      security_groups = [aws_security_group.ecs.id]
+      assign_public_ip = true
     }
-  ])
+    launch_type = "FARGATE"
+  }
+  role_arn = aws_iam_role.events_run_task.arn
 }
 
-# ---------- EventBridge hourly schedule -> ECS task ----------
-resource "aws_iam_role" "events_run_task" {
-  name = "faang-scraper-events-role"
-  assume_role_policy = jsonencode({
-    Version   = "2012-10-17",
-    Statement = [{ Effect = "Allow", Principal = { Service = "events.amazonaws.com" }, Action = "sts:AssumeRole" }]
-  })
-}
-
-resource "aws_iam_role_policy" "events_run_task" {
-  name = "faang-scraper-events-policy"
+# Permission allowing EventBridge to run ECS tasks
+resource "aws_iam_role_policy" "events_ecs_invoke" {
+  name = "${var.project_name}-scraper-events-ecs-invoke"
   role = aws_iam_role.events_run_task.id
   policy = jsonencode({
     Version = "2012-10-17",
     Statement = [{
-      Effect   = "Allow",
-      Action   = ["ecs:RunTask", "iam:PassRole"],
-      Resource = [aws_ecs_task_definition.scrape.arn, aws_iam_role.ecs_exec.arn, aws_iam_role.ecs_task.arn]
+      Effect = "Allow",
+      Action = ["iam:PassRole"],
+      Resource = aws_iam_role.ecs_task.arn
+    }, {
+      Effect = "Allow",
+      Action = ["ecs:RunTask"],
+      Resource = aws_ecs_task_definition.scraper.arn,
+      Condition = {
+        ArnEquals = {
+          "ecs:cluster" = aws_ecs_cluster.this.arn
+        }
+      }
     }]
   })
 }
 
-resource "aws_cloudwatch_event_rule" "hourly" {
-  name                = "faang-scraper-hourly"
-  schedule_expression = "rate(1 hour)"
-}
+####################
+# Lambda API and API Gateway
+####################
 
-resource "aws_cloudwatch_event_target" "ecs_target" {
-  rule      = aws_cloudwatch_event_rule.hourly.name
-  target_id = "scrape-ecs"
-  arn       = aws_ecs_cluster.this.arn
-  role_arn  = aws_iam_role.events_run_task.arn
-
-  ecs_target {
-    task_definition_arn = aws_ecs_task_definition.scrape.arn
-    launch_type         = "FARGATE"
-    network_configuration {
-      subnets          = aws_subnet.public[*].id
-      security_groups  = [aws_security_group.ecs_tasks.id]
-      assign_public_ip = true
-    }
-  }
-}
-
-# ---------- Lambda + API Gateway ----------
-data "archive_file" "lambda_zip" {
+# Package the API Lambda code.  Assumes the API code lives in the api/ directory
+# of your repository and that it produces a lambda.zip artifact in infra/ when
+# built.  Remove this archive packaging block if you handle packaging elsewhere.
+data "archive_file" "api_zip" {
   type        = "zip"
-  source_dir  = "${path.module}/../api"
-  output_path = "${path.module}/lambda.zip"
-}
-
-resource "aws_iam_role" "lambda_role" {
-  name = "faang-api-lambda-role"
-  assume_role_policy = jsonencode({
-    Version   = "2012-10-17",
-    Statement = [{ Effect = "Allow", Principal = { Service = "lambda.amazonaws.com" }, Action = "sts:AssumeRole" }]
-  })
-}
-resource "aws_iam_role_policy_attachment" "lambda_logs" {
-  role       = aws_iam_role.lambda_role.name
-  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
-}
-resource "aws_iam_role_policy" "lambda_ddb_read" {
-  name = "faang-api-ddb-read"
-  role = aws_iam_role.lambda_role.id
-  policy = jsonencode({
-    Version = "2012-10-17",
-    Statement = [{
-      Effect   = "Allow",
-      Action   = ["dynamodb:Query", "dynamodb:Scan", "dynamodb:GetItem", "dynamodb:DescribeTable"],
-      Resource = [aws_dynamodb_table.jobs.arn, "${aws_dynamodb_table.jobs.arn}/index/*"]
-    }]
-  })
+  source_dir  = "../api"
+  output_path = "${path.module}/lambda-api.zip"
 }
 
 resource "aws_lambda_function" "api" {
-  function_name = "faang-jobs-api"
-  role          = aws_iam_role.lambda_role.arn
-  handler       = "handler.handler"
-  runtime       = "python3.11"
-  filename      = data.archive_file.lambda_zip.output_path
-  timeout       = 10
-  environment { variables = { DDB_TABLE = aws_dynamodb_table.jobs.name } }
+  function_name    = "${var.project_name}-jobs-api"
+  handler          = "handler.lambda_handler"
+  runtime          = "python3.11"
+  role             = aws_iam_role.lambda_role.arn
+  filename         = data.archive_file.api_zip.output_path
+  source_code_hash = data.archive_file.api_zip.output_base64sha256
+  timeout          = 30
+  environment {
+    variables = {
+      TABLE_NAME = aws_dynamodb_table.jobs.name
+    }
+  }
+  depends_on = [aws_cloudwatch_log_group.lambda_api]
 }
 
+# Create an HTTP API Gateway for the Lambda function
 resource "aws_apigatewayv2_api" "http" {
-  name          = "faang-jobs-http"
+  name          = "${var.project_name}-jobs-http"
   protocol_type = "HTTP"
 }
 
-resource "aws_apigatewayv2_integration" "lambda" {
-  api_id                 = aws_apigatewayv2_api.http.id
-  integration_type       = "AWS_PROXY"
-  integration_uri        = aws_lambda_function.api.invoke_arn
-  payload_format_version = "2.0"
+resource "aws_apigatewayv2_integration" "api_integration" {
+  api_id             = aws_apigatewayv2_api.http.id
+  integration_type   = "AWS_PROXY"
+  integration_method = "POST"
+  integration_uri    = aws_lambda_function.api.invoke_arn
 }
 
-resource "aws_apigatewayv2_route" "get_jobs" {
+resource "aws_apigatewayv2_route" "jobs_route" {
   api_id    = aws_apigatewayv2_api.http.id
   route_key = "GET /jobs"
-  target    = "integrations/${aws_apigatewayv2_integration.lambda.id}"
+  target    = "integrations/${aws_apigatewayv2_integration.api_integration.id}"
 }
 
-resource "aws_lambda_permission" "apigw" {
-  statement_id  = "AllowInvokeByAPIGateway"
+resource "aws_apigatewayv2_stage" "default" {
+  api_id      = aws_apigatewayv2_api.http.id
+  name        = "$default"
+  auto_deploy = true
+}
+
+resource "aws_lambda_permission" "api_invoke" {
+  statement_id  = "AllowAPIGatewayInvoke"
   action        = "lambda:InvokeFunction"
   function_name = aws_lambda_function.api.function_name
   principal     = "apigateway.amazonaws.com"
   source_arn    = "${aws_apigatewayv2_api.http.execution_arn}/*/*"
 }
 
-resource "aws_apigatewayv2_stage" "prod" {
-  api_id      = aws_apigatewayv2_api.http.id
-  name        = "prod"
-  auto_deploy = true
+####################
+# Outputs
+####################
+
+output "table_name" {
+  description = "DynamoDB table name"
+  value       = aws_dynamodb_table.jobs.name
 }
 
-# ---------- Outputs ----------
-output "api_url" { value = "${aws_apigatewayv2_api.http.api_endpoint}/prod/jobs" }
-output "ecr_repo_url" { value = aws_ecr_repository.scraper.repository_url }
-output "ecs_cluster" { value = aws_ecs_cluster.this.name }
-output "task_def_arn" { value = aws_ecs_task_definition.scrape.arn }
-output "task_sg_id" { value = aws_security_group.ecs_tasks.id }
-output "subnet_ids" { value = aws_subnet.public[*].id }
+output "ecr_repository_url" {
+  description = "ECR repository URL for the scraper image"
+  value       = aws_ecr_repository.scraper.repository_url
+}
+
+output "api_endpoint" {
+  description = "Invoke URL for the jobs API"
+  value       = aws_apigatewayv2_stage.default.invoke_url
+}
