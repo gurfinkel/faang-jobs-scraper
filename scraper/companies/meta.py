@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 from typing import List, Optional
 from ..config import Settings
 from ..io_utils import log
