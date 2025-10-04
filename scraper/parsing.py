@@ -1,80 +1,90 @@
-# -*- coding: utf-8 -*-
-from __future__ import annotations
-
-import re
-import json
-from typing import Optional
+import re, time, json
+from datetime import datetime, timezone
+from typing import Tuple, Dict, Any
 from bs4 import BeautifulSoup
+from dateutil import parser as dateparser
 
-from .config import Settings
-from .http import get
+_IT_TITLE_RE = re.compile(
+    r"\b(software|developer|engineer|sde|swe|frontend|back[- ]?end|full[- ]?stack|ios|android|"
+    r"devops|sre|site reliability|platform|infra|cloud|security engineer|secops|"
+    r"data engineer|data scientist|ml engineer|machine learning|ai|qa|test|automation|"
+    r"systems engineer|network engineer|sysadmin|it support|help ?desk)\b",
+    re.I,
+)
 
-def strip_html(html: str) -> str:
-    soup = BeautifulSoup(html, "lxml")
-    for tag in soup(["script", "style", "noscript"]):
-        tag.decompose()
-    text_parts = []
-    for el in soup.find_all(["p", "li", "h2", "h3", "h4", "br"]):
-        if el.name == "li":
-            text_parts.append("• " + el.get_text(" ", strip=True))
-        elif el.name == "br":
-            text_parts.append("\n")
-        else:
-            text_parts.append(el.get_text(" ", strip=True))
-    text = "\n".join([t for t in text_parts if t.strip()])
-    if not text.strip():
-        text = soup.get_text("\n", strip=True)
-    return re.sub(r"\n{3,}", "\n\n", text).strip()
+def classify_category(title: str, desc: str) -> str:
+    text = f"{title or ''} {desc or ''}"
+    return "it" if _IT_TITLE_RE.search(text) else "other"
 
-def extract_job_description_from_jsonld(soup: BeautifulSoup) -> Optional[str]:
+def parse_ldjson_job(html: str) -> Dict[str, Any]:
+    soup = BeautifulSoup(html, "html.parser")
+    data: Dict[str, Any] = {}
     for script in soup.find_all("script", attrs={"type": "application/ld+json"}):
         try:
-            data = json.loads(script.string or "")
+            blob = json.loads(script.string or "")
         except Exception:
             continue
-        candidates = data if isinstance(data, list) else [data]
-        for obj in candidates:
-            if isinstance(obj, dict) and obj.get("@type") in ("JobPosting", ["JobPosting"]):
-                desc_html = obj.get("description")
-                if isinstance(desc_html, str) and desc_html.strip():
-                    return strip_html(desc_html)
-    return None
+        # Some pages wrap multiple objects in a list
+        objs = blob if isinstance(blob, list) else [blob]
+        for obj in objs:
+            if isinstance(obj, dict) and obj.get("@type") in ("JobPosting", "jobposting"):
+                data.update(obj)
+                return data
+    return {}
 
-def heuristic_main_text(soup: BeautifulSoup) -> str:
-    def score(el) -> int:
-        text = el.get_text(" ", strip=True)
-        return len(text) + 50 * len(el.find_all("li"))
-    containers = []
-    for sel in ["main", "article", "section", "div[id=content]", "div[role=main]"]:
-        containers.extend(soup.select(sel))
-    containers = [c for c in containers if c.get_text(strip=True)]
-    if containers:
-        best = max(containers, key=score)
-        return strip_html(str(best))
-    return strip_html(str(soup))
+def parse_posted_at(html: str) -> int:
+    jp = parse_ldjson_job(html)
+    if "datePosted" in jp:
+        try:
+            dt = dateparser.parse(jp["datePosted"])
+            return int(dt.replace(tzinfo=timezone.utc).timestamp())
+        except Exception:
+            pass
+    # Fallback: now
+    return int(time.time())
 
-# NEW: used by both requests- and Playwright-based fetchers
-def extract_description_from_html(html: str) -> Optional[str]:
-    soup = BeautifulSoup(html, "lxml")
+def extract_title(html: str) -> str:
+    soup = BeautifulSoup(html, "html.parser")
+    # Prefer H1
+    h1 = soup.find("h1")
+    if h1 and h1.get_text(strip=True):
+        return h1.get_text(strip=True)
+    if soup.title and soup.title.string:
+        return soup.title.string.strip()
+    return ""
 
-    # 1) JSON-LD JobPosting
-    desc = extract_job_description_from_jsonld(soup)
-    if desc and len(desc) > 80:
-        return desc
+def parse_location_fields(html: str) -> Tuple[str, str, str, int]:
+    """
+    Return (country_iso2, admin1, city, remote_flag). Best-effort from ld+json.
+    """
+    jp = parse_ldjson_job(html)
+    country = admin1 = city = ""
+    remote = 0
+    if jp:
+        # Remote?
+        if str(jp.get("jobLocationType", "")).lower() in ("telecommute", "remote"):
+            remote = 1
+        # jobLocation can be dict or list with 'address'
+        locs = jp.get("jobLocation")
+        if isinstance(locs, dict):
+            locs = [locs]
+        if isinstance(locs, list):
+            for loc in locs:
+                addr = loc.get("address") if isinstance(loc, dict) else None
+                if isinstance(addr, dict):
+                    country = (addr.get("addressCountry") or country or "").upper()
+                    admin1  = addr.get("addressRegion") or admin1
+                    city    = addr.get("addressLocality") or city
+    return country, admin1, city, remote
 
-    # 2) Meta description (short)
-    meta = soup.find("meta", attrs={"name": "description"})
-    if meta and meta.get("content"):
-        md = meta["content"].strip()
-        if md and len(md) > 60:
-            return md
-
-    # 3) Heuristic main content
-    return heuristic_main_text(soup)
-
-# Existing path for non-Playwright companies
-def extract_description(session, url: str, settings: Settings) -> Optional[str]:
-    resp = get(session, url, settings)
-    if not resp:
-        return None
-    return extract_description_from_html(resp.text)
+def extract_description_from_html(html: str) -> str:
+    # Very simple: choose the longest <section>/<div> block text near 'description'
+    soup = BeautifulSoup(html, "html.parser")
+    for sel in ["[itemprop=description]", "section", "article", "div"]:
+        blocks = soup.select(sel)
+        best = max((b.get_text(" ", strip=True) or "" for b in blocks), key=len, default="")
+        if best and len(best) > 200:
+            return best
+    # Fallback: whole page (trim)
+    text = soup.get_text(" ", strip=True)
+    return text[:4000]  # avoid overlong items

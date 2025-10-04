@@ -5,3 +5,6 @@ lxml>=5.2,<6
 
 # JS-rendered listings (Meta & Netflix)
 playwright>=1.46,<2
+
+python-dateutil
+pycountry
