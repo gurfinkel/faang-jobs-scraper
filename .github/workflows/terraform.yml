@@ -53,5 +53,4 @@ jobs:
 
       - name: Terraform Apply
         run: terraform apply -auto-approve -input=false
-        working-directory: infrapprove -input=false
         working-directory: infra
