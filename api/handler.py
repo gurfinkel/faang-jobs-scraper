@@ -35,7 +35,7 @@ def _parse_since(since: str) -> int:
 def _b64e(d): return base64.urlsafe_b64encode(json.dumps(d).encode()).decode()
 def _b64d(s): return json.loads(base64.urlsafe_b64decode(s.encode()))
 
-def handler(event, _ctx):
+def lambda_handler(event, _ctx):
     qs = (event.get("queryStringParameters") or {}) or {}
     company  = qs.get("company")
     category = (qs.get("category") or "it").lower()
