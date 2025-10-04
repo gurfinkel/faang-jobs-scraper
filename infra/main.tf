@@ -210,7 +210,8 @@ resource "aws_iam_role_policy_attachment" "ecs_task_attach" {
 
 # EventBridge rule role for triggering ECS tasks
 resource "aws_iam_role" "events_run_task" {
-  name_prefix = "${var.project_name}-scraper-events-role-"
+  # Shorten the events role prefix; long prefixes can exceed IAM role name limits.
+  name_prefix = "${var.project_name}-scraper-event-role-"
   assume_role_policy = jsonencode({
     Version = "2012-10-17",
     Statement = [{
@@ -222,7 +223,7 @@ resource "aws_iam_role" "events_run_task" {
 }
 
 resource "aws_iam_role_policy" "events_run_task" {
-  name = "${var.project_name}-scraper-events-policy"
+  name = "${var.project_name}-scraper-event-policy"
   role = aws_iam_role.events_run_task.id
   policy = jsonencode({
     Version = "2012-10-17",
@@ -297,7 +298,8 @@ data "aws_iam_policy_document" "ecs_task_execution_assume_role" {
 }
 
 resource "aws_iam_role" "ecs_task_execution" {
-  name_prefix = "${var.project_name}-scraper-execution-role-"
+  # Shorten the execution role prefix to avoid exceeding AWS's 38 character limit.
+  name_prefix = "${var.project_name}-scraper-exec-role-"
   assume_role_policy = data.aws_iam_policy_document.ecs_task_execution_assume_role.json
 }
 
@@ -341,7 +343,8 @@ resource "aws_ecs_task_definition" "scraper" {
 resource "aws_security_group" "ecs" {
   name        = "${var.project_name}-scraper-sg"
   description = "Security group for FAANG scraper tasks"
-  vpc_id      = data.aws_vpc.default.id
+  # Attach the security group to the default VPC managed by aws_default_vpc.default
+  vpc_id      = aws_default_vpc.default.id
 
   egress {
     from_port   = 0
@@ -351,17 +354,16 @@ resource "aws_security_group" "ecs" {
   }
 }
 
-# Use the default VPC and its subnets for Fargate tasks.  The AWS provider
-# version 5.x no longer exposes a data source named `aws_default_vpc`; instead
-# query the default VPC using `aws_vpc` with the `default` argument.
-data "aws_vpc" "default" {
-  default = true
-}
+# Use the default VPC and its subnets for Fargate tasks.  The aws_default_vpc
+# resource will adopt the account's default VPC if present or create one if not.
+resource "aws_default_vpc" "default" {}
 
+# Fetch all subnets belonging to the default VPC.  These may include both public
+# and private subnets depending on your AWS account configuration.
 data "aws_subnets" "default" {
   filter {
     name   = "vpc-id"
-    values = [data.aws_vpc.default.id]
+    values = [aws_default_vpc.default.id]
   }
 }
 
