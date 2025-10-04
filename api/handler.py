@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from dateutil import parser as dateparser
 
 DDB = boto3.resource("dynamodb")
-TABLE = DDB.Table(os.environ["DDB_TABLE"])
+TABLE = DDB.Table(os.environ["TABLE_NAME"])
 
 def _ok(body):  # HTTP API v2
     return {
