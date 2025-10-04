@@ -16,7 +16,7 @@ from .companies import netflix as netflix_mod
 
 USE_DDB = bool(os.environ.get("TABLE_NAME"))
 if USE_DDB:
-    from .storage import dynamo as ddb
+    from storage import dynamo as ddb
 
 def _company_map():
     return {
