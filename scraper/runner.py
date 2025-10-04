@@ -14,7 +14,7 @@ from .companies import google as google_mod
 from .companies import meta as meta_mod
 from .companies import netflix as netflix_mod
 
-USE_DDB = bool(os.environ.get("DDB_TABLE"))
+USE_DDB = bool(os.environ.get("TABLE_NAME"))
 if USE_DDB:
     from .storage import dynamo as ddb
 
