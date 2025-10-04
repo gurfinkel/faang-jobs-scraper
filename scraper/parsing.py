@@ -89,6 +89,21 @@ def parse_location_fields(html: str) -> Tuple[str, str, str, int]:
                 admin1, country = parts[-2], parts[-1]
             # Convert to ISO‑style if needed (upper‑case country)
             country = country.upper()
+    # Additional fallback: Amazon’s location div
+    if not country:
+        loc_div = soup.find('div', class_='location')
+        if loc_div:
+            # typical pattern: "Location: IT, Trentino-Alto Adige, Trento"
+            text = loc_div.get_text(strip=True)
+            text = text.replace('Location:', '').strip()
+            parts = [p.strip() for p in text.split(',') if p.strip()]
+            if len(parts) >= 3:
+                country = parts[-1].upper()
+                admin1 = parts[-2]
+                city = parts[-3]
+            elif len(parts) == 2:
+                country = parts[-1].upper()
+                admin1 = parts[-2]
     return country, admin1, city, remote
 
 def extract_description_from_html(html: str) -> str:
