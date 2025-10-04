@@ -15,6 +15,10 @@ class Settings:
     request_timeout: int = 20
     sleep_between_requests_sec: float = 1.2
     max_pages: int = 200
+    chunk_upsert_size: int = 100
+    max_new_per_run: int | None = None
+    lock_key: str = "faang-jobs-scraper"
+    lock_ttl_sec: int = 5400
 
 def make_settings(out_dir: str | Path = "data") -> Settings:
     out = Path(out_dir).resolve()
