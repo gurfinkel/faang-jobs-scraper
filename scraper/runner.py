@@ -94,6 +94,9 @@ def process_company(name: str, discover_fn, session, settings: Settings) -> Dict
                 desc  = extract_description_from_html(html)
                 posted_at = parse_posted_at(html)
                 ctry, admin1, city, remote = parse_location_fields(html)
+                if not ctry:
+                    log(settings, f"{name}: missing country for {u}")
+                    continue
                 cat = classify_category(title, desc)
                 if cat != "it":
                     continue

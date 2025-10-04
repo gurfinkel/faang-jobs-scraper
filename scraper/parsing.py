@@ -57,6 +57,7 @@ def parse_location_fields(html: str) -> Tuple[str, str, str, int]:
     """
     Return (country_iso2, admin1, city, remote_flag). Best-effort from ld+json.
     """
+    soup = BeautifulSoup(html, "html.parser")
     jp = parse_ldjson_job(html)
     country = admin1 = city = ""
     remote = 0
@@ -75,6 +76,19 @@ def parse_location_fields(html: str) -> Tuple[str, str, str, int]:
                     country = (addr.get("addressCountry") or country or "").upper()
                     admin1  = addr.get("addressRegion") or admin1
                     city    = addr.get("addressLocality") or city
+    # Fallback: look for a location label (e.g. Apple pages)
+    if not country:
+        loc_label = soup.find(id=lambda x: x and "joblocation" in x.lower())
+        if loc_label:
+            text = loc_label.get_text(strip=True)
+            # Split the string like "Cupertino, California, United States"
+            parts = [p.strip() for p in text.split(",") if p.strip()]
+            if len(parts) >= 3:
+                city, admin1, country = parts[-3], parts[-2], parts[-1]
+            elif len(parts) == 2:
+                admin1, country = parts[-2], parts[-1]
+            # Convert to ISO‑style if needed (upper‑case country)
+            country = country.upper()
     return country, admin1, city, remote
 
 def extract_description_from_html(html: str) -> str:
