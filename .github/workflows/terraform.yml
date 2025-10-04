@@ -32,10 +32,26 @@ jobs:
         run: terraform init
         working-directory: infra
 
+      - name: Create ECR repository
+        run: terraform apply -auto-approve -input=false -target=aws_ecr_repository.scraper
+        working-directory: infra
+
+      - name: Log in to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v1
+
+      - name: Build and push scraper Docker image
+        run: |
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          REGION=${{ secrets.AWS_REGION }}
+          REPO_URI="$ACCOUNT_ID.dkr.ecr.$REGION.amazonaws.com/faang-jobs-scraper-scraper"
+          docker build -t "$REPO_URI:latest" .
+          docker push "$REPO_URI:latest"
+
       - name: Terraform Plan
         run: terraform plan -input=false
         working-directory: infra
 
       - name: Terraform Apply
         run: terraform apply -auto-approve -input=false
+        working-directory: infrapprove -input=false
         working-directory: infra
