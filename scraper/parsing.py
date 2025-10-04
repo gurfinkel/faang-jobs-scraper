@@ -61,6 +61,8 @@ def parse_location_fields(html: str) -> Tuple[str, str, str, int]:
     jp = parse_ldjson_job(html)
     country = admin1 = city = ""
     remote = 0
+
+    # 1. Try JSON-LD
     if jp:
         # Remote?
         if str(jp.get("jobLocationType", "")).lower() in ("telecommute", "remote"):
@@ -76,7 +78,8 @@ def parse_location_fields(html: str) -> Tuple[str, str, str, int]:
                     country = (addr.get("addressCountry") or country or "").upper()
                     admin1  = addr.get("addressRegion") or admin1
                     city    = addr.get("addressLocality") or city
-    # Fallback: look for a location label (e.g. Apple pages)
+
+    # 2. Try Apple-style <label id="jobdetails-joblocation">
     if not country:
         loc_label = soup.find(id=lambda x: x and "joblocation" in x.lower())
         if loc_label:
@@ -89,21 +92,30 @@ def parse_location_fields(html: str) -> Tuple[str, str, str, int]:
                 admin1, country = parts[-2], parts[-1]
             # Convert to ISO‑style if needed (upper‑case country)
             country = country.upper()
-    # Additional fallback: Amazon’s location div
+
+    # 3. Try Amazon’s sidebar location <div class="location-icon">…<li>US, CA, Sunnyvale</li>
     if not country:
-        loc_div = soup.find('div', class_='location')
-        if loc_div:
-            # typical pattern: "Location: IT, Trentino-Alto Adige, Trento"
-            text = loc_div.get_text(strip=True)
-            text = text.replace('Location:', '').strip()
-            parts = [p.strip() for p in text.split(',') if p.strip()]
+        loc_li = soup.select_one("div.location-icon ul.association-content li")
+        if loc_li:
+            text = loc_li.get_text(strip=True)
+            parts = [p.strip() for p in text.split(",") if p.strip()]
+            # Country, region/state, city ordering depends on the site, adjust accordingly
             if len(parts) >= 3:
-                country = parts[-1].upper()
-                admin1 = parts[-2]
-                city = parts[-3]
+                country, admin1, city = parts[0].upper(), parts[1], parts[2]
             elif len(parts) == 2:
-                country = parts[-1].upper()
-                admin1 = parts[-2]
+                country, city = parts[0].upper(), parts[1]
+
+    # 4. Try parsing “dimension8” from Amazon’s analytics script
+    if not country:
+        match = re.search(r'"dimension8":"([^"]+)"', html)
+        if match:
+            loc_str = match.group(1)
+            parts = [p.strip() for p in loc_str.split(",") if p.strip()]
+            if len(parts) >= 3:
+                country, admin1, city = parts[0].upper(), parts[1], parts[2]
+            elif len(parts) == 2:
+                country, city = parts[0].upper(), parts[1]
+
     return country, admin1, city, remote
 
 def extract_description_from_html(html: str) -> str:
