@@ -2,26 +2,55 @@ from typing import List, Optional
 from ..config import Settings
 from ..io_utils import log
 from ..parsing import extract_description_from_html
-from ._playwright import discover_with_playwright
+from playwright.sync_api import sync_playwright
 
 BASE_URL = "https://jobs.apple.com"
 LIST_URL = f"{BASE_URL}/en-us/search"
-HREF_SUBSTRING = "/details/"  # Apple job detail pages include '/details/'
+HREF_SUBSTRING = "/details/"
 
-def discover(session, settings: Settings) -> List[str]:
+def discover(session, settings: Settings, max_pages: int = 10) -> List[str]:
     """
-    Use Playwright to scroll through Apple’s careers search page and collect
-    job detail URLs.  This approach picks up only currently open positions.
+    Return a list of job detail URLs from Apple’s search.  Iterates through paginated
+    results rather than stopping after the first page.  Limits to max_pages to avoid
+    scraping all 170+ pages in one run.
     """
-    urls = discover_with_playwright(
-        list_url=LIST_URL,
-        href_substring=HREF_SUBSTRING,
-        base=BASE_URL,
-        settings=settings,
-        max_scrolls=20
-    )
-    log(settings, f"apple: discovered {len(urls)} URLs")
-    return urls
+    urls: set[str] = set()
+    try:
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch(headless=True)
+            context = browser.new_context(user_agent=settings.user_agent)
+            page = context.new_page()
+            page.goto(LIST_URL, wait_until="networkidle", timeout=60_000)
+
+            for page_idx in range(max_pages):
+                # wait for job cards to render and collect all job links on this page
+                page.wait_for_selector(f"a[href*='{HREF_SUBSTRING}']", timeout=30_000)
+                anchors = page.query_selector_all(f"a[href*='{HREF_SUBSTRING}']")
+                for a in anchors:
+                    href = a.get_attribute("href")
+                    if href:
+                        if href.startswith("http"):
+                            urls.add(href)
+                        else:
+                            urls.add(f"{BASE_URL}{href}")
+
+                # look for a Next Page button that isn’t disabled; if none, break
+                next_btn = page.query_selector("button[aria-label='Next Page']:not([disabled])")
+                if not next_btn:
+                    break
+                # click Next Page and wait for new results
+                next_btn.click()
+                page.wait_for_load_state("networkidle", timeout=60_000)
+
+            context.close()
+            browser.close()
+    except Exception as e:
+        log(settings, f"apple: Playwright error during pagination: {e}")
+
+    # Return sorted list of unique job URLs
+    sorted_urls = sorted(urls)
+    log(settings, f"apple: discovered {len(sorted_urls)} URLs across {max_pages} pages")
+    return sorted_urls
 
 def get_description(url: str, settings: Settings) -> Optional[str]:
     """
