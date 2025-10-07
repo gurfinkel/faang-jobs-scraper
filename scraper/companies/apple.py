@@ -8,12 +8,13 @@ BASE_URL = "https://jobs.apple.com"
 LIST_URL = f"{BASE_URL}/en-us/search"
 HREF_SUBSTRING = "/details/"
 
-def discover(session, settings: Settings, max_pages: int = 10) -> List[str]:
+def discover(session, settings: Settings) -> List[str]:
     """
     Return a list of job detail URLs from Apple’s search.  Iterates through paginated
     results rather than stopping after the first page.  Limits to max_pages to avoid
     scraping all 170+ pages in one run.
     """
+    max_pages = settings.max_pages
     urls: set[str] = set()
     try:
         with sync_playwright() as pw:
