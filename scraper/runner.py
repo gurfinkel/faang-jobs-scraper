@@ -34,7 +34,7 @@ def _fetch_html(session, url: str, settings: Settings) -> str:
 
 def process_company(name: str, discover_fn, session, settings: Settings) -> Dict[str, int]:
     log(settings, f"--- {name.upper()} --- discovering links")
-    urls = discover_fn(session, settings, max_pages=settings.max_pages)
+    urls = discover_fn(session, settings)
     discovered = list(dict.fromkeys(urls))
     log(settings, f"{name}: discovered {len(discovered)} URLs")
 

@@ -6,9 +6,10 @@ from ..io_utils import log
 BASE = "https://www.amazon.jobs"
 API  = f"{BASE}/search.json"
 
-def discover(session, settings: Settings, page_size: int = 100) -> List[str]:
+def discover(session, settings: Settings) -> List[str]:
     urls = []
     offset = 0
+    page_size = 100
     max_pages = settings.max_pages
     while offset < max_pages * page_size:
         params = {
