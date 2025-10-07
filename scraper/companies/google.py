@@ -1,21 +1,21 @@
-"""Scraper for Google's careers site.
-
-This module uses Playwright to handle Google's client‑side rendered
-job listings.  The Google careers site dynamically loads job cards
-via JavaScript, so a simple HTTP GET will not reveal all jobs.  To
-extract job posting links, we launch a headless Chromium browser,
-navigate to the jobs results page, and scroll the page to trigger
-lazy loading.  Links are collected from the DOM after each scroll.
-
-If Playwright is not installed, the module logs a message and
-returns an empty list.
 """
+Google Careers scraper using Playwright.
 
+Fixes:
+- Collects ONLY job detail URLs (with numeric ID segment).
+- Exhausts the in-page results by scrolling AND clicking "load more" buttons.
+- Also visits paginated results via ?page=2..N to catch any server-side pages.
+
+Detail URL examples: /jobs/results/73675063508771526-software-engineer-iii/
+Google also exposes a page parameter: /jobs/results/?page=30
+(Confirmed via public pages and job feeds.)
+"""
 from __future__ import annotations
 
+import re
 import time
 from typing import List, Set
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 from ..config import Settings
 from ..io_utils import log
@@ -23,99 +23,128 @@ from ..io_utils import log
 BASE = "https://careers.google.com"
 
 try:
-    # Try to import Playwright.  If unavailable, discover will no‑op.
     from playwright.sync_api import sync_playwright  # type: ignore
-except Exception:  # pragma: no cover - Playwright may not be installed
+except Exception:  # pragma: no cover
     sync_playwright = None  # type: ignore
 
+_DETAIL_RE = re.compile(r"^/jobs/results/\d{6,}(-[a-z0-9-]+)?/?$", re.I)
+
+def _is_job_detail_url(href: str) -> bool:
+    try:
+        p = urlparse(href)
+    except Exception:
+        return False
+    if p.netloc and p.netloc != "careers.google.com":
+        return False
+    return bool(_DETAIL_RE.match(p.path or ""))
 
 def _collect_job_links(page) -> Set[str]:
-    """Return a set of absolute job detail URLs currently present on the page.
-
-    Google job cards are represented by anchors whose ``href`` contains
-    ``/jobs/results/``.  Both absolute and relative hrefs are handled.
-
-    Args:
-        page: A Playwright page object with a loaded jobs results page.
-
-    Returns:
-        A set of absolute job detail URLs.
-    """
     urls: Set[str] = set()
     anchors = page.query_selector_all("a[href*='/jobs/results/']")
     for a in anchors:
-        href = a.get_attribute("href")
+        href = (a.get_attribute("href") or "").strip()
         if not href:
             continue
-        href = href.strip()
-        if href.startswith("http"):
-            urls.add(href)
-        else:
-            urls.add(urljoin(BASE, href))
+        abs_url = href if href.startswith("http") else urljoin(BASE, href)
+        if _is_job_detail_url(abs_url):
+            urls.add(abs_url)
     return urls
 
+def _click_load_more_if_any(page) -> int:
+    """
+    Click common 'load more' buttons if found; return number of clicks performed.
+    """
+    selectors = [
+        "button[aria-label*='more' i]",
+        "button:has-text('Load more')",
+        "button:has-text('More jobs')",
+        "button:has-text('Show more')",
+        "button:has-text('More results')",
+        "div[role='button']:has-text('Load more')",
+    ]
+    clicks = 0
+    for sel in selectors:
+        btns = page.query_selector_all(sel)
+        for btn in btns:
+            try:
+                if btn.is_enabled() and btn.is_visible():
+                    btn.click()
+                    clicks += 1
+                    page.wait_for_load_state("networkidle", timeout=10_000)
+                    time.sleep(0.5)
+            except Exception:
+                pass
+    return clicks
+
+def _exhaust_results_on_page(page, settings: Settings, max_scrolls: int) -> Set[str]:
+    """
+    Scroll + click-load-more loop until content plateaus.
+    """
+    urls: Set[str] = set()
+    last_count = -1
+    scrolls = 0
+    while scrolls < max_scrolls:
+        # Scroll to bottom
+        try:
+            page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+        except Exception:
+            pass
+        time.sleep(settings.sleep_between_requests_sec)
+
+        # Click any 'load more' if present
+        _click_load_more_if_any(page)
+
+        # Collect links
+        urls |= _collect_job_links(page)
+
+        # Plateau check
+        if len(urls) == last_count:
+            break
+        last_count = len(urls)
+        scrolls += 1
+    return urls
 
 def discover(session, settings: Settings) -> List[str]:
-    """Discover Google job posting URLs using Playwright.
+    """
+    Discover Google job posting URLs using Playwright.
 
-    This function navigates to the Google careers search results page
-    and scrolls the page repeatedly to trigger additional jobs to
-    load.  After each scroll, it collects job links and stops when
-    either the maximum number of scrolls (from ``settings.max_pages``)
-    is reached or no new content loads.
-
-    Args:
-        session: Ignored; included for API compatibility.
-        settings: Configuration controlling user agent, timeouts and
-            the maximum number of scrolls.
-
-    Returns:
-        A sorted list of unique job posting URLs.  If Playwright is
-        unavailable, an empty list is returned.
+    Strategy:
+      1) Visit /jobs/results/ and exhaust it by scrolling and clicking 'load more'.
+      2) Then, visit explicit pages /jobs/results/?page=2..N as a safety net.
     """
     urls: Set[str] = set()
 
-    # Abort if Playwright isn't available
     if sync_playwright is None:
         log(settings, "google: Playwright not installed; cannot discover jobs")
         return []
 
-    # Determine how many scrolls to perform.  ``max_pages`` maps to
-    # scroll operations; fall back to 40 if unset or invalid.
-    max_scrolls = settings.max_pages
-    if not isinstance(max_scrolls, int) or max_scrolls <= 0:
-        max_scrolls = 40
+    max_scrolls = settings.max_pages if isinstance(settings.max_pages, int) and settings.max_pages > 0 else 40
+    max_pages = max_scrolls  # reuse the same cap to avoid a new setting
 
     try:
         with sync_playwright() as pw:
             browser = pw.chromium.launch(headless=True)
             context = browser.new_context(user_agent=settings.user_agent)
             page = context.new_page()
-            # Navigate to the jobs results page
+
+            # 1) Main results page
             page.goto(f"{BASE}/jobs/results/", wait_until="networkidle", timeout=60_000)
+            urls |= _exhaust_results_on_page(page, settings, max_scrolls=max_scrolls)
 
-            # Collect links before scrolling
-            urls |= _collect_job_links(page)
-            last_height = 0
-            scroll_count = 0
-
-            while scroll_count < max_scrolls:
-                # Scroll to bottom to load more jobs
+            # 2) Explicit pagination fallback (?page=2..N)
+            for i in range(2, max_pages + 1):
                 try:
-                    page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                    page.goto(f"{BASE}/jobs/results/?page={i}", wait_until="networkidle", timeout=60_000)
+                    new_urls = _exhaust_results_on_page(page, settings, max_scrolls=10)
+                    if not new_urls:
+                        break
+                    before = len(urls)
+                    urls |= new_urls
+                    if len(urls) == before:
+                        # No growth – likely exhausted
+                        break
                 except Exception:
-                    pass
-                time.sleep(settings.sleep_between_requests_sec)
-                urls |= _collect_job_links(page)
-                # Check if new content loaded based on scroll height
-                try:
-                    height = page.evaluate("document.body.scrollHeight")
-                except Exception:
-                    height = last_height
-                if height == last_height:
                     break
-                last_height = height
-                scroll_count += 1
 
             context.close()
             browser.close()
